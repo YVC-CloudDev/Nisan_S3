@@ -1,58 +1,84 @@
 # ============================================================
-# DEPLOY TO AWS S3 — GitHub Actions Workflow
+# DEPLOY TO AWS S3 - GitHub Actions Workflow
 # ============================================================
-# Automatically uploads the static website to an S3 bucket
-# whenever code is pushed to main.
-#
-# Uses OIDC (OpenID Connect) to authenticate with AWS —
-# no static access keys needed.
-#
-# ---- PREREQUISITES ----
-# 1. An S3 bucket configured for static website hosting.
-# 2. An IAM Role with s3:PutObject, s3:DeleteObject, and
-#    s3:ListBucket permissions, trusting the GitHub OIDC provider.
-# 3. Two GitHub repository secrets:
-#      • AWS_ROLE_ARN   — the ARN of the IAM Role
-#      • S3_BUCKET_NAME — the name of the S3 bucket
+# This workflow automatically uploads our static website
+# to an Amazon S3 bucket whenever we push code to main.
+# It uses OIDC (OpenID Connect) to securely authenticate
+# with AWS — no secret access keys needed!
 # ============================================================
 
+# --- WORKFLOW NAME ---
+# This is the display name shown in the GitHub Actions tab
 name: Deploy to S3
 
+# --- TRIGGERS ---
+# "on" defines WHEN this workflow runs
 on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+  push:                        # Trigger when code is pushed...
+    branches: [ main ]         # ...but ONLY to the "main" branch (not feature branches)
+  workflow_dispatch:           # Also allow manual trigger via "Run workflow" button in GitHub UI
 
+# --- PERMISSIONS ---
+# These control what the workflow's GITHUB_TOKEN is allowed to do
 permissions:
-  id-token: write    # Required for OIDC token generation
-  contents: read     # Required to checkout the repo
+  id-token: write              # REQUIRED: Lets GitHub generate an OIDC token (a short-lived identity proof)
+                               # This token is sent to AWS to prove "I am this GitHub repo"
+                               # Without this, the IAM Role assumption FAILS
+  contents: read               # Allows the workflow to read/clone the repository code
 
+# --- ENVIRONMENT VARIABLES ---
+# Reusable variables available to ALL jobs and steps in this workflow
 env:
-  AWS_REGION: us-east-1
+  S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}     # The bucket name, stored as a GitHub Secret for security
 
+# --- JOBS ---
+# A workflow is made up of one or more jobs that run in parallel by default
 jobs:
-  deploy:
-    name: Upload to S3
-    runs-on: ubuntu-latest
+  deploy-to-s3:                    # Job ID (used internally by GitHub Actions)
+    name: Upload Website to S3     # Display name shown in the Actions UI
+    runs-on: ubuntu-latest         # Use a GitHub-hosted Ubuntu runner (free Linux VM)
 
+    # --- STEPS ---
+    # Steps run sequentially, one after another, inside this job
     steps:
+
+      # STEP 1: Checkout the repository code
+      # Without this, the runner has an empty workspace — no files to deploy!
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6  # Official GitHub action to clone our repo onto the runner
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      # STEP 2: Authenticate with AWS using OIDC (no static keys!)
+      # This is where the magic happens:
+      #   1. GitHub generates an OIDC token (thanks to id-token: write permission)
+      #   2. The token is sent to AWS STS (Security Token Service)
+      #   3. AWS checks the token against the IAM Role's trust policy
+      #   4. If it matches our repo, AWS gives us temporary credentials
+      - name: Configure AWS Credentials (Assume IAM Role via OIDC)
+        uses: aws-actions/configure-aws-credentials@v6   # Official AWS action for OIDC auth (Node.js 24)
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}     # The IAM Role ARN, stored as a GitHub Secret
+          aws-region: us-east-1                            # AWS region (S3 works from any region)
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
-      - name: Sync files to S3
+      # STEP 3: Verify we successfully authenticated
+      # "aws sts get-caller-identity" shows WHO we are in AWS (the assumed role)
+      # This is optional but great for debugging — if auth fails, you'll see it here
+      - name: Verify AWS Identity
         run: |
-          aws s3 sync . s3://${{ secrets.S3_BUCKET_NAME }} \
+          echo "✅ Successfully assumed IAM Role"
+          aws sts get-caller-identity
+
+      # STEP 4: Upload the website files to S3
+      # "aws s3 sync" works like rsync — only uploads files that changed
+      - name: Sync website files to S3
+        run: |
+          echo "🚀 Deploying to S3 bucket: $S3_BUCKET"
+          aws s3 sync . s3://$S3_BUCKET \
             --delete \
             --exclude ".git/*" \
             --exclude ".github/*" \
             --exclude "README.md" \
             --exclude "LICENSE"
+          echo "✅ Deployment complete!"
+          # --delete     = Remove files from S3 that no longer exist locally (keeps bucket clean)
+          # --exclude    = Skip files we don't want on the website (git files, workflows, docs)
+          # s3 sync      = Only uploads NEW or CHANGED files (faster than copying everything)
